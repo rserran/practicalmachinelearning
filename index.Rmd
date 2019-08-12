@@ -1,0 +1,209 @@
+---
+title: "JHU Coursera Practical Machine Learning Course Project"
+author: "Ricardo J. Serrano"
+date: "8/10/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(caret)
+library(doParallel)
+library(knitr)
+theme_set(theme_light())
+options(digits = 2)
+knitr::opts_chunk$set(fig.height = 4, fig.width = 4, echo = TRUE, message = FALSE)
+```
+
+## Introduction
+
+The goal of this project is to predict the manner in which 6 participants are performing different specific exercises from wearable devices accelerometer data. The participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. The data from this project came from this source:  http://groupware.les.inf.puc-rio.br/har.
+
+## Reading the data
+```{r}
+train_data <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"))
+
+test_data <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"))
+```
+
+## Exploratory Data Analysis
+```{r}
+dim(train_data)
+dim(test_data)
+str(train_data)
+str(test_data)
+```
+
+The raw training dataset has `r nrow(train_data)` records with `r ncol(train_data)` variables (columns). The raw testing has `r nrow(test_data)` records with the same number of columns. From the str output, there are several variables with NAs or blanks.
+
+Print variables with NAs or blanks ("") percentage greater than 0.8
+```{r}
+which(colMeans(is.na(train_data) | train_data == "") > 0.8)
+```
+
+Let's remove thoses variables. For the training dataset, the first seven variables will be removed, since they are not necessary for the predictive model. In the case of the testing dataset, only the first variable will be discarded.
+```{r}
+var_remove <- which(colMeans(is.na(train_data) | train_data == "") > 0.8)
+train_clean <- train_data[, -var_remove]
+train_clean <- train_clean[, -c(1:7)]
+test_clean <- test_data[, -var_remove]
+test_clean <- test_clean[, -1]
+dim(train_clean)
+dim(test_clean)
+```
+
+The final training dataset has the same records with `r ncol(train_clean)` variables. This data set will be used to create the training and testing datasets for the caret package.
+
+```{r}
+set.seed(105)
+inTrain <- createDataPartition(y = train_clean$classe, p = 0.8, list = FALSE)
+training <- train_clean[inTrain, ]
+testing <- train_clean[-inTrain, ]
+dim(training)
+dim(testing)
+```
+
+Configure parallel processing for efficient (and faster) caret execution
+```{r}
+cl <- makeCluster(detectCores() - 1) # leave 1 core for OS
+registerDoParallel(cl)
+getDoParWorkers()
+```
+
+The classification models chosen are: 
+* linear discriminant analysis (lda)
+* random forest (ranger)
+* gradient boosting machines (gbm)
+
+For the resampling method, the repeated k-cross validation method ("repeatedcv") is applied to reduce sampling bias.
+
+## Train model: linear discriminant analysis (lda)
+
+Linear discriminant analysis (LDA), normal discriminant analysis (NDA), or discriminant function analysis is a generalization of Fisher's linear discriminant, a method used in statistics, pattern recognition and machine learning to find a linear combination of features that characterizes or separates two or more classes of objects or events. The resulting combination may be used as a linear classifier, or, more commonly, for dimensionality reduction before later classification. Source: https://en.wikipedia.org/wiki/Linear_discriminant_analysis
+
+```{r}
+ldaControl <- trainControl(method = "repeatedcv", 
+                           number = 5, 
+                           repeats = 5, 
+                           allowParallel = TRUE)
+
+set.seed(105)
+ldafit <- train(classe ~ ., data = training,
+                 method = "lda", 
+                 trControl = ldaControl)
+ldafit
+```
+
+Print confusion matrix for lda model
+```{r}
+pred_lda <- predict(ldafit, newdata = testing)
+conf_lda <- confusionMatrix(pred_lda, testing$classe)
+conf_lda
+```
+
+The accuracy of the lda model is around `r conf_lda$overall[1]*100`%, which is less than satisfactory (model accuracy must be greater than 90%).
+
+## Train model: random forest (rf)
+
+Random forests or random decision forests are an ensemble learning method for classification, regression and other tasks that operates by constructing a multitude of decision trees at training time and outputting the class that is the mode of the classes (classification) or mean prediction (regression) of the individual trees. Random decision forests correct for decision trees' habit of overfitting to their training set. Source: https://en.wikipedia.org/wiki/Random_forest
+
+```{r}
+rfControl <- trainControl(method = "repeatedcv", 
+                           number = 5, 
+                           repeats = 5, 
+                           allowParallel = TRUE)
+
+set.seed(105)
+rf_fit <- train(classe ~ ., data = training,
+                 method = "rf", 
+                 trControl = rfControl)
+rf_fit
+
+plot(rf_fit, main = "Random Forest Accuracy by Number of Predictors")
+```
+
+Print confusion matrix for random forest model
+```{r}
+pred_rf <- predict(rf_fit, newdata = testing)
+conf_rf <- confusionMatrix(pred_rf, testing$classe)
+conf_rf
+
+## oob error rate
+rf_fit$finalModel$err.rate[500, 1]
+```
+
+The random forest model overall accuracy is `r conf_rf$overall[1]*100`%, with an out-of-sample error of `r rf_fit$finalModel$err.rate[500, 1]*100`%. The overall accuracy rate is significanlty greater than the linear discriminant analysis model.
+
+Final Model and Variable Importance List
+```{r}
+rf_fit$finalModel
+
+varImp(rf_fit)
+
+plot(rf_fit$finalModel, main = "Random Forest Model Error by Number of Trees")
+```
+
+The optimal number of predictors as shown in the plot titled "Random Forest Accuracy by Number of Predictors" is 27. After this point, the model accuracy decreases dramatically as the number of predictors increases. In the plot titled "Random Forest Model Error by Number of Trees", the error rate stabilizes after approximately 50 trees, suggesting this number of trees is optimmum.
+
+## Train model: gradient boosted machines (gbm)
+
+Gradient boosting is a machine learning technique for regression and classification problems, which produces a prediction model in the form of an ensemble of weak prediction models, typically decision trees. It builds the model in a stage-wise fashion like other boosting methods do, and it generalizes them by allowing optimization of an arbitrary differentiable loss function. Source: https://en.wikipedia.org/wiki/Gradient_boosting
+
+```{r}
+gbmControl <- trainControl(method = "repeatedcv", 
+                           number = 5, 
+                           repeats = 5, 
+                           allowParallel = TRUE)
+
+set.seed(105)
+gbmfit <- train(classe ~ ., data = training, 
+                method = "gbm", 
+                trControl = gbmControl, 
+                verbose = FALSE)
+gbmfit
+
+plot(gbmfit, main = "GBM Number of Iterations (first run)")
+
+## model tuning
+gbmGrid <-  expand.grid(interaction.depth = c(1, 3, 5, 7), 
+                        n.trees = (1:10)*50, 
+                        shrinkage = 0.1,
+                        n.minobsinnode = 10)
+
+gbmfit_f <- train(classe ~ ., data = training, 
+                method = "gbm", 
+                trControl = gbmControl, 
+                verbose = FALSE, 
+                tuneGrid = gbmGrid)
+gbmfit_f
+
+plot(gbmfit_f, main = "GBM Number of Iterations (final)")
+```
+
+Print confusion matrix and accuracy for gbm model
+```{r}
+pred_gbm <- predict(gbmfit_f, newdata = testing)
+conf_gbm <- confusionMatrix(pred_gbm, testing$classe)
+conf_gbm
+```
+
+## Conclusion
+
+The gradient boosted mchinas (gbm) model overall accuracy is `r conf_gbm$overall[1]*100`%, with an out-of-sample error rate of `r (1- conf_gbm$overall[1])*100`%. The overall accuracy is significanlty greater than the linear discriminant analysis model and slightly better than the randon forest model. This is the best model and will be applied to predict the classe variable in the test dataset (test_clean).
+
+```{r}
+final_pred <- predict(gbmfit_f, newdata = test_clean)
+final_pred
+```
+
+De-provision parallel cluster
+```{r}
+stopCluster(cl)
+registerDoSEQ()
+```
+
+References:
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz5wKbTlgFa
